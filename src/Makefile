@@ -10,7 +10,7 @@ LIBS=
 _DEPS = 
 DEPS = $(patsubst %,$(IDIR)/%,$(_DEPS))
 
-_OBJ = main.o chunk.o debug.o memory.o value.o
+_OBJ = main.o chunk.o debug.o memory.o value.o vm.o
 OBJ = $(patsubst %,$(ODIR)/%,$(_OBJ))
 
 
