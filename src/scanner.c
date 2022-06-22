@@ -123,7 +123,7 @@ static TokenType identifierType() {
             }
             break;
         }
-        case 'v': return checkKeyword(1, 3, "ar", TOKEN_VAR);
+        case 'v': return checkKeyword(1, 2, "ar", TOKEN_VAR);
         case 'w': return checkKeyword(1, 4, "hile", TOKEN_WHILE);
         default: return TOKEN_IDENTIFIER;
     }

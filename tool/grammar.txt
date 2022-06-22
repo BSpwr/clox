@@ -1,0 +1,9 @@
+statement       ->  exprStmt
+                |   printStmt ;
+
+declaration     ->  varDecl
+                |   statement ;
+
+exprStmt        ->  expression ';'
+
+varDecl         ->  "var" ('=' expression)? ';'
