@@ -69,7 +69,6 @@ Value peek(int distance) { return vm.stackTop[-distance - 1]; }
 static bool isFalsey(Value value) { return IS_NIL(value) || (IS_BOOL(value) && !AS_BOOL(value)); }
 
 static void concatenate() {
-    printf("AAAA");
     ObjString* b = AS_STRING(pop());
     ObjString* a = AS_STRING(pop());
 
@@ -120,6 +119,18 @@ static InterpretResult run() {
             case OP_TRUE: push(BOOL_VAL(true)); break;
             case OP_FALSE: push(BOOL_VAL(false)); break;
             case OP_POP: pop(); break;
+
+            case OP_GET_LOCAL: {
+                uint8_t slot = READ_BYTE();
+                push(vm.stack[slot]);
+                break;
+            }
+
+            case OP_SET_LOCAL: {
+                uint8_t slot = READ_BYTE();
+                vm.stack[slot] = peek(0);
+                break;
+            }
 
             case OP_GET_GLOBAL: {
                 ObjString* name = READ_STRING();
