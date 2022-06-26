@@ -1,12 +1,23 @@
 statement       ->  exprStmt
                 |   printStmt
+                |   ifStmt
+                |   whileStmt
+                |   forStmt
                 |   block ;
 
-block           ->  "{" declaration* "}" ;
+forStmt     ->  "for" "(" ( varDecl | exprStmt | ";" )
+                expression? ";"
+                expression? ")" statement ;
+
+whileStmt       ->  "while" '(' expression ')' statment ;
+
+ifStmt          ->  "if" '(' expression ')' statement ("else" statement)? ;
+
+block           ->  "{" declaration* "}" statment ;
 
 declaration     ->  varDecl
                 |   statement ;
 
-exprStmt        ->  expression ';'
+exprStmt        ->  expression ';' ;
 
-varDecl         ->  "var" ('=' expression)? ';'
+varDecl         ->  "var" ('=' expression)? ';' ;

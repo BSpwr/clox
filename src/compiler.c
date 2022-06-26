@@ -7,6 +7,7 @@
 #include "common.h"
 #include "object.h"
 #include "scanner.h"
+#include "vm.h"
 
 #ifdef DEBUG_PRINT_CODE
 #include "debug.h"
@@ -77,17 +78,20 @@ static void emitByte(uint8_t byte);
 static void emitBytes(uint8_t byte1, uint8_t byte2);
 static void emitReturn();
 static void emitConstant(Value value);
+static int  emitJump(uint8_t instruction);
+static void patchJump(int offset);
+static void emitLoop(int loopStart);
 
 // Variable/constant/scope helpers
 static uint8_t makeConstant(Value value);
 static uint8_t identifierConstant(Token* name);
 static void    declareVariable();
 static bool    identifiersEqual(Token* a, Token* b);
-static int resolveLocal(Compiler* compiler, Token* name);
+static int     resolveLocal(Compiler* compiler, Token* name);
 static void    addLocal(Token name);
 static void    namedVariable(Token name, bool canAssign);
 static void    defineVariable(uint8_t global);
-static void markInitialized();
+static void    markInitialized();
 static uint8_t parseVariable(const char* errorMessage);
 static void    beginScope();
 static void    endScope();
@@ -106,6 +110,9 @@ static void expressionStatement();
 static void printStatement();
 static void synchronize();
 static void block();
+static void ifStatement();
+static void whileStatment();
+static void forStatement();
 
 // Pratt parsing
 ParseRule         rules[];
@@ -118,6 +125,8 @@ static void       number(bool canAssign);
 static void       string(bool canAssign);
 static void       literal(bool canAssign);
 static void       variable(bool canAssign);
+static void       and_(bool canAssign);
+static void       or_(bool canAssign);
 // ---- END FORWARD DECLARATIONS ---- //
 
 static void errorAt(Token* token, const char* message) {
@@ -191,6 +200,38 @@ static uint8_t makeConstant(Value value) {
 }
 
 static void emitConstant(Value value) { emitBytes(OP_CONSTANT, makeConstant(value)); }
+
+static int emitJump(uint8_t instruction) {
+    emitByte(instruction);
+    emitBytes(0xff, 0xff);
+    return currentChunk()->count - 2;
+}
+
+static void patchJump(int offset) {
+    // Offset is the index where the jump instruction itself is written.
+
+    // -2 to adjust for the bytecode for the jump offset itself.
+    int jump = currentChunk()->count - offset - 2;
+
+    if (jump > UINT16_MAX) {
+        error("Too much code to jump over.");
+    }
+
+    // Jump offset stored big-endian.
+    currentChunk()->code[offset]     = (jump >> 8) & 0xff;
+    currentChunk()->code[offset + 1] = jump & 0xff;
+}
+
+// Emit a new loop instruction which unconditionally jumps backwards to a given offset.
+static void emitLoop(int loopStart) {
+    emitByte(OP_LOOP);
+
+    // The +2 is to take into account the size of the OP_LOOP instructions's operands.
+    int offset = currentChunk()->count - loopStart + 2;
+    if (offset > UINT16_MAX) error("Loop body too large.");
+
+    emitBytes((offset >> 8) & 0xff, offset & 0xff);
+}
 
 static void initCompiler(Compiler* compiler) {
     compiler->localCount = 0;
@@ -355,7 +396,7 @@ static void declareVariable() {
         if (local->depth != -1 && local->depth < current->scopeDepth) {
             break;
         }
-        
+
         // If the variable was declared but not assigned to before (depth == -1)
         // and the scope depth and name matches, that is invalid.
         if (identifiersEqual(name, &local->name)) {
@@ -399,12 +440,12 @@ static void addLocal(Token name) {
 
 static void namedVariable(Token name, bool canAssign) {
     uint8_t getOp, setOp;
-    int arg = resolveLocal(current, &name);
+    int     arg = resolveLocal(current, &name);
     if (arg != -1) {
         getOp = OP_GET_LOCAL;
         setOp = OP_SET_LOCAL;
     } else {
-        arg = identifierConstant(&name);
+        arg   = identifierConstant(&name);
         getOp = OP_GET_GLOBAL;
         setOp = OP_SET_GLOBAL;
     }
@@ -419,6 +460,35 @@ static void namedVariable(Token name, bool canAssign) {
 
 static void variable(bool canAssign) { namedVariable(parser.previous, canAssign); }
 
+static void and_(bool canAssign) {
+    int endJump = emitJump(OP_JUMP_IF_FALSE);
+
+    emitByte(OP_POP);  // Pop the left-hand side
+    parsePrecedence(PREC_AND);
+
+    // When the left-hand side of the and is falsey
+    // that value sticks around to become the result
+    // of the entire expression.
+    patchJump(endJump);
+}
+
+static void or_(bool canAssign) {
+    // In this, we need to jump if the left-hand side is truthy
+    int avoidJump = emitJump(OP_JUMP_IF_FALSE);
+    int endJump   = emitJump(OP_JUMP);
+
+    patchJump(avoidJump);
+    emitByte(OP_POP);  // Pop the left-hand side value
+    // Right-hand side value will stick around to become
+    // the result of the entire expression.
+
+    parsePrecedence(PREC_OR);
+    patchJump(endJump);
+    // Otherwise skip the right-hand side and the
+    // left-hand side value will stick around to become
+    // the result of the entire expression.
+}
+
 static uint8_t parseVariable(const char* errorMessage) {
     consume(TOKEN_IDENTIFIER, errorMessage);
 
@@ -432,7 +502,10 @@ static uint8_t parseVariable(const char* errorMessage) {
 }
 
 static void defineVariable(uint8_t global) {
-    if (current->scopeDepth > 0) {markInitialized(); return;}
+    if (current->scopeDepth > 0) {
+        markInitialized();
+        return;
+    }
     emitBytes(OP_DEFINE_GLOBAL, global);
 }
 
@@ -508,9 +581,106 @@ static void block() {
     consume(TOKEN_RIGHT_BRACE, "Expect '}' after block.");
 }
 
+static void ifStatement() {
+    consume(TOKEN_LEFT_PAREN, "Expect '(' after 'if'.");
+    expression();
+    consume(TOKEN_RIGHT_PAREN, "Expect ')' after condition.");
+
+    int thenJump = emitJump(OP_JUMP_IF_FALSE);
+    emitByte(OP_POP);  // Pop the condition inside the if branch.
+    statement();
+
+    int elseJump = emitJump(OP_JUMP);
+
+    patchJump(thenJump);
+    emitByte(OP_POP);  // Pop the condition inside the else branch.
+
+    if (match(TOKEN_ELSE)) statement();
+    patchJump(elseJump);
+}
+
+static void whileStatment() {
+    int loopStart = currentChunk()->count;
+
+    consume(TOKEN_LEFT_PAREN, "Expect '(' after 'while'.");
+    expression();
+    consume(TOKEN_RIGHT_PAREN, "Expect ')' after condition.");
+
+    int exitJump = emitJump(OP_JUMP_IF_FALSE);
+
+    emitByte(OP_POP);
+    statement();
+
+    emitLoop(loopStart);
+
+    patchJump(exitJump);
+    emitByte(OP_POP);
+}
+
+static void forStatement() {
+    beginScope();
+
+    consume(TOKEN_LEFT_PAREN, "Expect '(' after 'for'.");
+
+    // In a for loop, first the initializer is run once (and only once)
+    if (match(TOKEN_SEMICOLON)) {
+        // No initializer.
+    } else if (match(TOKEN_VAR))
+        varDeclaration();
+    else {
+        expressionStatement();
+    }
+
+    int loopStart = currentChunk()->count;
+
+    // The condition is checked before every run of the loop.
+    int exitJump = -1;
+    if (!match(TOKEN_SEMICOLON)) {
+        expression();
+        consume(TOKEN_SEMICOLON, "Expect ';' after loop condition.");
+
+        // Jump out of the loop if the condition is false.
+        exitJump = emitJump(OP_JUMP_IF_FALSE);
+        emitByte(OP_POP);  // Condition
+    }
+
+    // When an increment is present, we need to compile it now, but it shouldn't execute yet.
+    if (!match(TOKEN_RIGHT_PAREN)) {
+        // We emit an unconditional jump that hops over the increment clause to the body of the loop.
+        int bodyJump = emitJump(OP_JUMP);
+
+        int incrementStart = currentChunk()->count;
+        expression(); // Next we compile the increment expression itself.
+        emitByte(OP_POP); // Pop expression, since it is only executed for it's side effect.
+        consume(TOKEN_RIGHT_PAREN, "Expect ')' after for loop initializer.");
+
+        emitLoop(loopStart); // First, we emit a loop instruction.
+        // Then we change loopStart to point to the offset where the increment expression begins.
+        // This is how we stitch the increment in to run after the body.
+        loopStart = incrementStart;
+        patchJump(bodyJump); 
+    }
+
+    statement();
+    emitLoop(loopStart);
+
+    if (exitJump != -1) {
+        patchJump(exitJump);
+        emitByte(OP_POP); // Condition.
+    }
+
+    endScope();
+}
+
 static void statement() {
     if (match(TOKEN_PRINT)) {
         printStatement();
+    } else if (match(TOKEN_IF)) {
+        ifStatement();
+    } else if (match(TOKEN_WHILE)) {
+        whileStatment();
+    } else if (match(TOKEN_FOR)) {
+        forStatement();
     } else if (match(TOKEN_LEFT_BRACE)) {
         beginScope();
         block();
@@ -542,7 +712,7 @@ ParseRule rules[] = {
     [TOKEN_IDENTIFIER]    = {variable, NULL,   PREC_NONE      },
     [TOKEN_STRING]        = {string,   NULL,   PREC_NONE      },
     [TOKEN_NUMBER]        = {number,   NULL,   PREC_NONE      },
-    [TOKEN_AND]           = {NULL,     NULL,   PREC_NONE      },
+    [TOKEN_AND]           = {NULL,     and_,   PREC_AND       },
     [TOKEN_CLASS]         = {NULL,     NULL,   PREC_NONE      },
     [TOKEN_ELSE]          = {NULL,     NULL,   PREC_NONE      },
     [TOKEN_FALSE]         = {literal,  NULL,   PREC_NONE      },
@@ -550,7 +720,7 @@ ParseRule rules[] = {
     [TOKEN_FUN]           = {NULL,     NULL,   PREC_NONE      },
     [TOKEN_IF]            = {NULL,     NULL,   PREC_NONE      },
     [TOKEN_NIL]           = {literal,  NULL,   PREC_NONE      },
-    [TOKEN_OR]            = {NULL,     NULL,   PREC_NONE      },
+    [TOKEN_OR]            = {NULL,     or_,    PREC_OR        },
     [TOKEN_PRINT]         = {NULL,     NULL,   PREC_NONE      },
     [TOKEN_RETURN]        = {NULL,     NULL,   PREC_NONE      },
     [TOKEN_SUPER]         = {NULL,     NULL,   PREC_NONE      },
