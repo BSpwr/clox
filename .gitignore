@@ -1,2 +1,4 @@
 clox
 **/.vscode
+**/compile_commands.json
+**/.cache/

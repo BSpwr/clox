@@ -2,15 +2,24 @@
 #define clox_vm_h
 
 #include "chunk.h"
+#include "object.h"
 #include "table.h"
 
-#define STACK_MAX 256
+#define FRAMES_MAX 64
+#define STACK_MAX (FRAMES_MAX * UINT8_COUNT)
+
+
+typedef struct CallFrame {
+    ObjFunction* function;
+    uint8_t*     ip;
+    Value* slots;  // Points into the VM's value stack at the first slot this function can use.
+} CallFrame;
 
 typedef struct VM {
-    Chunk* chunk;
-    uint8_t* ip;
-    Value stack[STACK_MAX];
-    Value* stackTop;
+    CallFrame frames[FRAMES_MAX];
+    int frameCount;
+    Value    stack[STACK_MAX];
+    Value*   stackTop;
 
     Table globals;
     Table strings;
@@ -26,13 +35,13 @@ typedef enum InterpretResult {
     INTERPRET_RUNTIME_ERROR,
 } InterpretResult;
 
-void initVM();
-static void resetStack();
-void freeVM();
-InterpretResult interpret(const char* source);
-static InterpretResult run();
-void push(Value value);
-Value pop();
-Value peek(int distance);
+void                   initVM();
+static void            resetStack();
+static void defineNative(const char* name, NativeFn function);
+void                   freeVM();
+InterpretResult        interpret(const char* source);
+void                   push(Value value);
+Value                  pop();
+Value                  peek(int distance);
 
 #endif
