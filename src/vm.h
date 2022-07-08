@@ -10,9 +10,9 @@
 
 
 typedef struct CallFrame {
-    ObjFunction* function;
+    ObjClosure* closure;
     uint8_t*     ip;
-    Value* slots;  // Points into the VM's value stack at the first slot this function can use.
+    Value* slots;  // Points into the VM's value stack at the first slot this closure can use.
 } CallFrame;
 
 typedef struct VM {
@@ -23,6 +23,7 @@ typedef struct VM {
 
     Table globals;
     Table strings;
+    ObjUpvalue* openUpvalues;
 
     Obj* objects;
 } VM;

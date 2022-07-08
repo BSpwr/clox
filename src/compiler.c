@@ -45,7 +45,13 @@ typedef struct ParseRule {
 typedef struct Local {
     Token name;
     int   depth;
+    bool  isCaptured;
 } Local;
+
+typedef struct Upvalue {
+    uint8_t index;
+    bool    isLocal;
+} Upvalue;
 
 typedef enum FunctionType { TYPE_FUNCTION, TYPE_SCRIPT } FunctionType;
 
@@ -54,9 +60,10 @@ typedef struct Compiler {
     ObjFunction*     function;
     FunctionType     type;
 
-    Local locals[UINT8_COUNT];
-    int   localCount;
-    int   scopeDepth;
+    Local   locals[UINT8_COUNT];
+    int     localCount;
+    Upvalue upvalues[UINT8_COUNT];
+    int     scopeDepth;
 } Compiler;
 
 Parser parser;
@@ -94,7 +101,9 @@ static uint8_t identifierConstant(Token* name);
 static void    declareVariable();
 static bool    identifiersEqual(Token* a, Token* b);
 static int     resolveLocal(Compiler* compiler, Token* name);
+static int     resolveUpvalue(Compiler* compiler, Token* name);
 static void    addLocal(Token name);
+static int     addUpvalue(Compiler* compiler, uint8_t index, bool isLocal);
 static void    namedVariable(Token name, bool canAssign);
 static void    defineVariable(uint8_t global);
 static uint8_t argumentList();
@@ -197,7 +206,10 @@ static void emitBytes(uint8_t byte1, uint8_t byte2) {
     emitByte(byte2);
 }
 
-static void emitReturn() { emitByte(OP_NIL); emitByte(OP_RETURN); }
+static void emitReturn() {
+    emitByte(OP_NIL);
+    emitByte(OP_RETURN);
+}
 
 // Adds a constant to the chunk's dynamic value array, and returns the index to constant
 static uint8_t makeConstant(Value value) {
@@ -258,6 +270,7 @@ static void initCompiler(Compiler* compiler, FunctionType type) {
 
     Local* local       = &current->locals[current->localCount++];
     local->depth       = 0;
+    local->isCaptured  = false;
     local->name.start  = "";
     local->name.length = 0;
 }
@@ -284,7 +297,12 @@ static void endScope() {
 
     while (current->localCount >= 0 &&
            current->locals[current->localCount - 1].depth > current->scopeDepth) {
-        emitByte(OP_POP);
+        if (current->locals[current->localCount - 1].isCaptured) {
+            emitByte(OP_CLOSE_UPVALUE);
+        } else {
+            emitByte(OP_POP);
+        }
+
         current->localCount--;
     }
 }
@@ -460,6 +478,31 @@ static int resolveLocal(Compiler* compiler, Token* name) {
     return -1;
 }
 
+static int resolveUpvalue(Compiler* compiler, Token* name) {
+    // If we've reached the enclosing compiler and didn't find the local variable, it's global.
+    if (compiler->enclosing == NULL) return -1;
+
+    // Try to resolve the identifier as a local variable in the enclosing compiler.
+    int local = resolveLocal(compiler->enclosing, name);
+    if (local != -1) {
+        compiler->enclosing->locals[local].isCaptured = true;
+        return addUpvalue(compiler, (uint8_t)local, true);
+    }
+
+    /* Otherwise, we look for a local variable beyond the immediately enclosing
+     * function. We do that by recursively calling resolveUpvalue() on the
+     * enclosing compiler, not the current one. This series of resolveUpvalue() calls
+     * works its way along the chain of nested compilers until it hits one of the base
+     * cases—either it finds an actual local variable to capture or it runs out of
+     * compilers. */
+    int upvalue = resolveUpvalue(compiler->enclosing, name);
+    if (upvalue != -1) {
+        return addUpvalue(compiler, (uint8_t)upvalue, false);
+    }
+
+    return -1;
+}
+
 /* This creates a new Local and appends it to the compiler’s array of variables. It
 stores the variable’s name and the depth of the scope that owns the variable. */
 static void addLocal(Token name) {
@@ -467,9 +510,33 @@ static void addLocal(Token name) {
         error("Too many local variables in function.");
         return;
     }
-    Local* local = &current->locals[current->localCount++];
-    local->name  = name;
-    local->depth = -1;
+    Local* local      = &current->locals[current->localCount++];
+    local->name       = name;
+    local->depth      = -1;
+    local->isCaptured = false;
+}
+
+static int addUpvalue(Compiler* compiler, uint8_t index, bool isLocal) {
+    int upvalueCount = compiler->function->upvalueCount;
+
+    // If we find an upvalue in the array whose slot index matches the one we’re
+    // adding, we just return that upvalue index and reuse it. Otherwise, we fall
+    // through and add the new upvalue.
+    for (int i = 0; i < upvalueCount; i++) {
+        Upvalue* upvalue = &compiler->upvalues[i];
+        if (upvalue->index == index && upvalue->isLocal == isLocal) {
+            return i;
+        }
+    }
+
+    if (upvalueCount == UINT8_COUNT) {
+        error("Too many closure variables in function.");
+        return 0;
+    }
+
+    compiler->upvalues[upvalueCount].isLocal = isLocal;
+    compiler->upvalues[upvalueCount].index   = index;
+    return compiler->function->upvalueCount++;
 }
 
 static void namedVariable(Token name, bool canAssign) {
@@ -478,6 +545,9 @@ static void namedVariable(Token name, bool canAssign) {
     if (arg != -1) {
         getOp = OP_GET_LOCAL;
         setOp = OP_SET_LOCAL;
+    } else if ((arg = resolveUpvalue(current, &name)) != -1) {
+        getOp = OP_GET_UPVALUE;
+        setOp = OP_SET_UPVALUE;
     } else {
         arg   = identifierConstant(&name);
         getOp = OP_GET_GLOBAL;
@@ -602,7 +672,8 @@ static void returnStatement() {
         error("Can't return from top-level code.");
     }
 
-    if (match(TOKEN_SEMICOLON)) emitReturn();
+    if (match(TOKEN_SEMICOLON))
+        emitReturn();
     else {
         expression();
         consume(TOKEN_SEMICOLON, "Expect ';' after return value.");
@@ -677,7 +748,12 @@ static void function(FunctionType type) {
     block();
 
     ObjFunction* function = endCompiler();
-    emitBytes(OP_CONSTANT, makeConstant(OBJ_VAL(function)));
+    emitBytes(OP_CLOSURE, makeConstant(OBJ_VAL(function)));
+
+    for (int i = 0; i < function->upvalueCount; i++) {
+        emitByte(compiler.upvalues[i].isLocal ? 1 : 0);
+        emitByte(compiler.upvalues[i].index);
+    }
 }
 
 static void ifStatement() {
