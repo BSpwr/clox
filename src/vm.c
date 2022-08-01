@@ -21,11 +21,19 @@ static Value clockNative(int argCount, Value* args) {
 
 void initVM() {
     resetStack();
+    vm.objects      = NULL;
+    vm.openUpvalues = NULL;
+
+    vm.bytesAllocated = 0;
+    vm.nextGC         = 1024 * 1024;
+
+    vm.grayCount    = 0;
+    vm.grayCapacity = 0;
+    vm.grayStack    = NULL;
+
     initTable(&vm.globals);
     initTable(&vm.strings);
     defineNative("clock", clockNative);
-    vm.objects      = NULL;
-    vm.openUpvalues = NULL;
 }
 
 static void resetStack() {
@@ -166,8 +174,13 @@ static void closeUpvalues(Value* last) {
 static bool isFalsey(Value value) { return IS_NIL(value) || (IS_BOOL(value) && !AS_BOOL(value)); }
 
 static void concatenate() {
-    ObjString* b = AS_STRING(pop());
-    ObjString* a = AS_STRING(pop());
+    // Concatenating two strings requires allocating a new character array on the heap, which can in
+    // turn trigger a GC. Since we’ve already popped the operand strings by that point, they can
+    // potentially be missed by the mark phase and get swept away. Instead of popping them off the
+    // stack eagerly, we peek them, so they remain on the stack while the string is created. Once
+    // that’s done, we can safely pop them off and replace them with the result.
+    ObjString* b = AS_STRING(peek(0));
+    ObjString* a = AS_STRING(peek(1));
 
     int   length = a->length + b->length;
     char* chars  = ALLOCATE(char, length + 1);
@@ -176,6 +189,8 @@ static void concatenate() {
     chars[length] = '\0';
 
     ObjString* result = takeString(chars, length);
+    pop();
+    pop();
     push(OBJ_VAL(result));
 }
 

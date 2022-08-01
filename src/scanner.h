@@ -1,6 +1,7 @@
 #ifndef clox_scanner_h
 #define clox_scanner_h
 
+// clang-format off
 typedef enum TokenType {
     // Single-character tokens.
     TOKEN_LEFT_PAREN, TOKEN_RIGHT_PAREN,
