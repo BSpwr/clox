@@ -60,6 +60,8 @@ static void markRoots() {
     // table. If the GC runs while we’re in the middle of compiling, then any values the
     // compiler directly accesses need to be treated as roots too.
     markCompilerRoots();
+
+    markObject((Obj*)vm.initString);
 }
 
 static void blackenObject(Obj* object);
@@ -161,6 +163,7 @@ static void blackenObject(Obj* object) {
         case OBJ_CLASS: {
             ObjClass* klass = (ObjClass*)object;
             markObject((Obj*)klass->name);
+            markTable(&klass->methods);
             break;
         }
         case OBJ_CLOSURE: {
@@ -171,6 +174,12 @@ static void blackenObject(Obj* object) {
             for (int i = 0; i < closure->upvalueCount; i++) {
                 markObject((Obj*)closure->upvalues[i]);
             }
+            break;
+        }
+        case OBJ_BOUND_METHOD: {
+            ObjBoundMethod* bound = (ObjBoundMethod*)object;
+            markValue(bound->receiver);
+            markObject((Obj*)bound->method);
             break;
         }
     }
@@ -208,6 +217,8 @@ void freeObject(Obj* object) {
 
     switch (object->type) {
         case OBJ_CLASS: {
+            ObjClass* class = (ObjClass*)object;
+            freeTable(&class->methods);
             FREE(ObjClass, object);
             break;
         }
