@@ -75,6 +75,7 @@ typedef struct Compiler {
 typedef struct ClassCompiler {
     struct ClassCompiler* enclosing;
     Token                 name;
+    bool hasSuperclass;
 } ClassCompiler;
 
 Parser parser;
@@ -111,6 +112,7 @@ static void emitLoop(int loopStart);
 // Variable/constant/scope helpers
 static uint8_t makeConstant(Value value);
 static uint8_t identifierConstant(Token* name);
+static Token syntheticToken(const char* name);
 static void    declareVariable();
 static bool    identifiersEqual(Token* a, Token* b);
 static int     resolveLocal(Compiler* compiler, Token* name);
@@ -164,6 +166,7 @@ static void       variable(bool canAssign);
 static void       this_(bool canAssign);
 static void       and_(bool canAssign);
 static void       or_(bool canAssign);
+static void super_(bool canAssign);
 // ---- END FORWARD DECLARATIONS ---- //
 
 static void errorAt(Token* token, const char* message) {
@@ -483,6 +486,13 @@ static uint8_t identifierConstant(Token* name) {
     return makeConstant(OBJ_VAL(copyString(name->start, name->length)));
 }
 
+static Token syntheticToken(const char* text) {
+    Token token;
+    token.start = text;
+    token.length = (int)strlen(text);
+    return token;
+}
+
 /* This is the point where the compiler records the existence of the variable. We
 only do this for locals, so if we’re in the top level global scope, we just bail out.
 Because global variables are late bound, the compiler doesn’t keep track of
@@ -653,6 +663,34 @@ static void or_(bool canAssign) {
     // Otherwise skip the right-hand side and the
     // left-hand side value will stick around to become
     // the result of the entire expression.
+}
+
+static void super_(bool canAssign) {
+    if (currentClass == NULL) {
+        error("Can't use 'super' outside of a class.");
+    } else if (!currentClass->hasSuperclass) {
+        error("Can't use 'super' in a class with no superclass.");
+    }
+
+    consume(TOKEN_DOT, "Expect '.' after 'super'.");
+    consume(TOKEN_IDENTIFIER, "Expect superclass method name.");
+    uint8_t name = identifierConstant(&parser.previous);
+
+    namedVariable(syntheticToken("this"), false);
+
+    if (match(TOKEN_LEFT_PAREN)) {
+        uint8_t argCount = argumentList();
+        namedVariable(syntheticToken("super"), false);
+        emitBytes(OP_SUPER_INVOKE, name);
+        emitByte(argCount);
+    } else {
+        namedVariable(syntheticToken("super"), false);
+        emitBytes(OP_GET_SUPER, name);
+    }
+
+
+    namedVariable(syntheticToken("super"), false);
+    emitBytes(OP_GET_SUPER, name);
 }
 
 static uint8_t parseVariable(const char* errorMessage) {
@@ -849,8 +887,34 @@ static void classDeclaration() {
     ClassCompiler classCompiler;
 
     classCompiler.name      = parser.previous;
+    classCompiler.hasSuperclass = false;
     classCompiler.enclosing = currentClass;
     currentClass            = &classCompiler;
+
+    if (match(TOKEN_LESS)) {
+        consume(TOKEN_IDENTIFIER, "Expect superclass name.");
+        variable(false); // Look up superclass by name and put on the stack.
+
+        if (identifiersEqual(&className, &parser.previous)) {
+            error("A class can't inherit from itself.");
+        }
+
+        // Over in the front end, compiling the superclass clause emits bytecode that loads
+        // the superclass onto the stack. Instead of leaving that slot as a temporary, we
+        // create a new scope and make it a local variable.
+
+        // Creating a new lexical scope ensures that if we declare two classes in the same
+        // scope, each has a different local slot to store its superclass. Since we always
+        // name this variable “super”, if we didn’t make a scope for each subclass, the
+        // variables would collide.
+        beginScope();
+        addLocal(syntheticToken("super"));
+        defineVariable(0);
+    
+        namedVariable(className, false); // Load subclass doing the inheriting onto the stack.
+        emitByte(OP_INHERIT);
+        classCompiler.hasSuperclass = true;
+    }
 
     namedVariable(className, false);
     consume(TOKEN_LEFT_BRACE, "Expect '{' before class body.");
@@ -859,6 +923,10 @@ static void classDeclaration() {
     }
     consume(TOKEN_RIGHT_BRACE, "Expect '}' after class body.");
     emitByte(OP_POP);
+
+    if (classCompiler.hasSuperclass) {
+        endScope();
+    }
 
     currentClass = currentClass->enclosing;
 }
@@ -1008,7 +1076,7 @@ ParseRule rules[] = {
     [TOKEN_OR]            = {NULL,     or_,    PREC_OR        },
     [TOKEN_PRINT]         = {NULL,     NULL,   PREC_NONE      },
     [TOKEN_RETURN]        = {NULL,     NULL,   PREC_NONE      },
-    [TOKEN_SUPER]         = {NULL,     NULL,   PREC_NONE      },
+    [TOKEN_SUPER]         = {super_,     NULL,   PREC_NONE      },
     [TOKEN_THIS]          = {this_,    NULL,   PREC_NONE      },
     [TOKEN_TRUE]          = {literal,  NULL,   PREC_NONE      },
     [TOKEN_VAR]           = {NULL,     NULL,   PREC_NONE      },
